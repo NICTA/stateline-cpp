@@ -29,6 +29,20 @@ namespace detail
 
 constexpr int NUM_IO_THREADS = 2;
 
+template <class T>
+void writePrimitive(std::string& s, T val)
+{
+  std::string buf{reinterpret_cast<char *>(&val), sizeof(val)};
+  s.append(std::move(buf));
+}
+
+template <class T>
+T readPrimitive(const char* buf)
+{
+  return *reinterpret_cast<T *>(buf);
+}
+
+
 //! Thin wrapper around a TCP ZMQ_STREAM socket. Provides functions to connect
 //! to the server and send messages.
 //!
@@ -50,6 +64,8 @@ public:
   {
   }
 
+  TcpSocket(const TcpSocket&) = delete;
+
   //! Connect to a host.
   //!
   //! \param address The address of the host, without the protocol prefix (e.g. localhost:5000)
@@ -69,15 +85,16 @@ public:
   //!
   //! \params data The bytes to send.
   //!
-  void send(std::string data)
+  void send(const std::string& data)
   {
     // Send the header first (zero-copy)
     zmq::message_t header{serverIdentity_.data(), serverIdentity_.size(), NULL};
     socket_.send(header, ZMQ_SNDMORE);
 
     // Send the payload message
-    zmq::message_t msg{&data[0], data.size(), NULL};
-    socket_.send(msg, 0);
+    zmq::message_t msg{data.size()};
+    memcpy(msg.data(), data.data(), data.size()); // TODO: eliminate this copy
+    socket_.send(msg);
   }
 
   std::string recv()
@@ -99,26 +116,11 @@ template <class Socket>
 class MessageHandler
 {
 private:
-  struct Hello
-  {
-    std::uint8_t msgType = 0x1;
-    std::uint8_t version;
-    std::uint32_t jobTypeFrom;
-    std::uint32_t jobTypeTo;
-  };
-
   struct JobHeader
   {
     std::uint8_t msgType = 0x2;
     std::uint32_t id;
     std::uint32_t type;
-  };
-
-  struct Result
-  {
-    std::uint8_t msgType = 0x3;
-    std::uint32_t id;
-    double data;
   };
 
 public:
@@ -141,40 +143,36 @@ public:
 
   void sendHello()
   {
-    static_assert(std::is_trivially_copyable<Hello>::value, "'Hello' must be trivially copyable");
+    std::string buf;
+    writePrimitive(buf, std::uint8_t{1});                          // Message type
+    writePrimitive(buf, std::uint8_t{STATELINE_PROTOCOL_VERSION}); // Version
+    writePrimitive(buf, std::uint32_t{0});                         // Job type from
+    writePrimitive(buf, std::uint32_t{0});                         // Job type to
 
-    Hello msg;
-    msg.version = STATELINE_PROTOCOL_VERSION;
-
-    std::string buf{reinterpret_cast<char *>(&msg), sizeof(msg)}; // TODO: eliminate copy with string_ref
-    socket_.send(std::move(buf));
+    socket_.send(buf);
   }
 
   Job recvJob()
   {
-    static_assert(std::is_trivially_copyable<JobHeader>::value, "'JobHeader' must be trivially copyable");
-
     const auto buf = socket_.recv();
-
-    assert(buf.size() >= sizeof(JobHeader));
-    const auto job = reinterpret_cast<const JobHeader *>(buf.data());
+    readPrimitive<std::uint8_t>(buf.data());                  // Message type
+    auto id = readPrimitive<std::uint32_t>(buf.data() + 1);   // Job ID
+    auto type = readPrimitive<std::uint32_t>(buf.data() + 5); // Job type
 
     // The remaining bytes in the buffer is the job data
-    std::vector<double> data(buf.size() - sizeof(JobHeader));
+    std::vector<double> data(buf.size() - 9);
     memcpy(data.data(), buf.data() + sizeof(JobHeader), data.size()); // TODO: remove this copy
 
-    return {job->id, job->type, std::move(data)};
+    return {id, type, std::move(data)};
   }
 
   void sendResult(std::uint32_t id, double data)
   {
-    static_assert(std::is_trivially_copyable<Result>::value, "'Result' must be trivially copyable");
+    std::string buf;
+    writePrimitive(buf, std::uint8_t{3});   // Message type
+    writePrimitive(buf, std::uint32_t{id}); // Version
+    writePrimitive(buf, double{data});      // Data
 
-    Result msg;
-    msg.id = id;
-    msg.data = data;
-
-    std::string buf{reinterpret_cast<char *>(&msg), sizeof(msg)};
     socket_.send(std::move(buf));
   }
 
@@ -207,13 +205,14 @@ void runWorker(const std::string& address, Nll nll)
 
   // TODO: Start heartbeats
 
+  /*
   while (false) // TODO: interrupt flag
   {
     const auto job = handler.recvJob();
     const auto result = nll(job.type, job.data);
 
     handler.sendResult(job.id, result);
-  }
+  }*/
 }
 
 }
