@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <future>
@@ -29,19 +30,55 @@ namespace detail
 
 constexpr int NUM_IO_THREADS = 2;
 
-template <class T>
-void writePrimitive(std::string& s, T val)
+template <class... Args>
+struct PackSize;
+
+template <class T, class... Args>
+struct PackSize<T, Args...>
 {
-  std::string buf{reinterpret_cast<char *>(&val), sizeof(val)};
-  s.append(std::move(buf));
+  static constexpr std::size_t value = sizeof(T) + PackSize<Args...>::value;
+};
+
+template <>
+struct PackSize<> { static constexpr std::size_t value = 0; };
+
+char* packBuffer(char* buf)
+{
+  return buf;
 }
 
-template <class T>
-T readPrimitive(const char* buf)
+template <class T, class... Args>
+char* packBuffer(char* buf, T val, Args... args)
 {
-  return *reinterpret_cast<T *>(buf);
+  memcpy(buf, reinterpret_cast<char*>(&val), sizeof(val));
+  return packBuffer(buf + sizeof(val), args...);
 }
 
+template <class... Args>
+std::array<char, PackSize<Args...>::value> packArray(Args... args)
+{
+  std::array<char, PackSize<Args...>::value> buffer;
+  packBuffer(buffer.data(), args...);
+  return buffer;
+}
+
+std::pair<std::tuple<>, const char*> unpackBuffer(const char* buf)
+{
+  return {{}, buf};
+}
+
+template <class T, class... Args>
+std::pair<std::tuple<T, Args...>, const char*> unpackBuffer(const char* buf)
+{
+  T val = reinterpret_cast<const T*>(buf);
+
+  // TODO: can we do this more efficiently?
+  auto result = unpackBuffer<Args...>(buf + sizeof(T));
+  return {
+      std::tuple_cat(std::tuple<T>(val), result.first),
+      result.second
+  };
+}
 
 //! Thin wrapper around a TCP ZMQ_STREAM socket. Provides functions to connect
 //! to the server and send messages.
@@ -81,19 +118,19 @@ public:
     serverIdentity_.resize(idSize);
   }
 
-  //! Send a string. connect() must be called prior to calling this method.
+  //! Send a buffer. connect() must be called prior to calling this method.
   //!
   //! \params data The bytes to send.
   //!
-  void send(const std::string& data)
+  void send(const char* buf, std::size_t size)
   {
     // Send the header first (zero-copy)
     zmq::message_t header{serverIdentity_.data(), serverIdentity_.size(), NULL};
     socket_.send(header, ZMQ_SNDMORE);
 
     // Send the payload message
-    zmq::message_t msg{data.size()};
-    memcpy(msg.data(), data.data(), data.size()); // TODO: eliminate this copy
+    zmq::message_t msg{size};
+    memcpy(msg.data(), buf, size);
     socket_.send(msg);
   }
 
@@ -115,14 +152,6 @@ private:
 template <class Socket>
 class MessageHandler
 {
-private:
-  struct JobHeader
-  {
-    std::uint8_t msgType = 0x2;
-    std::uint32_t id;
-    std::uint32_t type;
-  };
-
 public:
   struct Job
   {
@@ -136,59 +165,52 @@ public:
   {
   }
 
-  void sendHeartbeat()
-  {
-    socket_.send("\x00");
-  }
-
   void sendHello()
   {
-    std::string buf;
-    writePrimitive(buf, std::uint8_t{1});                          // Message type
-    writePrimitive(buf, std::uint8_t{STATELINE_PROTOCOL_VERSION}); // Version
-    writePrimitive(buf, std::uint32_t{0});                         // Job type from
-    writePrimitive(buf, std::uint32_t{0});                         // Job type to
+    auto buf = packArray(
+      std::uint8_t{1},                            // Message type
+      std::uint8_t{STATELINE_PROTOCOL_VERSION},   // Version
+      std::uint32_t{0},                           // Job type from
+      std::uint32_t{0}                            // Job type to
+    );
 
-    socket_.send(buf);
+    socket_.send(buf.data(), buf.size());
   }
 
   Job recvJob()
   {
     const auto buf = socket_.recv();
-    readPrimitive<std::uint8_t>(buf.data());                  // Message type
-    auto id = readPrimitive<std::uint32_t>(buf.data() + 1);   // Job ID
-    auto type = readPrimitive<std::uint32_t>(buf.data() + 5); // Job type
+    auto result = unpackBuffer<
+      std::uint8_t,   // Message type
+      std::uint32_t,  // Job ID
+      std::uint32_t   // Job type
+    >(buf);
 
     // The remaining bytes in the buffer is the job data
-    std::vector<double> data(buf.size() - 9);
-    memcpy(data.data(), buf.data() + sizeof(JobHeader), data.size()); // TODO: remove this copy
+    std::vector<double> data(buf.size() - (result.second - buf.data()));
+    memcpy(data.data(), result.second, data.size());
 
-    return {id, type, std::move(data)};
+    return {
+      std::get<1>(result.first),
+      std::get<2>(result.first),
+      std::move(data)
+    };
   }
 
   void sendResult(std::uint32_t id, double data)
   {
-    std::string buf;
-    writePrimitive(buf, std::uint8_t{3});   // Message type
-    writePrimitive(buf, std::uint32_t{id}); // Version
-    writePrimitive(buf, double{data});      // Data
+    auto buf = packArray(
+      std::uint8_t{3},   // Message type
+      std::uint32_t{id}, // Job ID
+      double{data}       // Data
+    );
 
-    socket_.send(std::move(buf));
+    socket_.send(buf.data(), buf.size());
   }
 
 private:
   Socket& socket_;
 };
-
-template <class Socket>
-void heartbeat(MessageHandler<Socket>& handler, int ms)
-{
-  while (false) // TODO: interrupt flag
-  {
-    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-    handler.sendHeartbeat();
-  }
-}
 
 }
 
@@ -202,8 +224,6 @@ void runWorker(const std::string& address, Nll nll)
 
   // Send hello message to initiate the protocol
   handler.sendHello();
-
-  // TODO: Start heartbeats
 
   /*
   while (false) // TODO: interrupt flag
