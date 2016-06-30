@@ -1,11 +1,12 @@
-#include <vector>
 #include <iostream>
+#include <numeric>
+#include <vector>
 
 #include <stateline/worker.hpp>
 
-double nll(stateline::JobType, const std::vector<double>&)
+double nll(stateline::JobType, const std::vector<double>& data)
 {
-  return 0.0;
+  return std::accumulate(data.begin(), data.end(), 0.0);
 }
 
 int main(int argc, const char *argv[])

@@ -10,9 +10,11 @@
 #pragma once
 
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <type_traits>
 #include <vector>
 
 #include <cppzmq/zmq.hpp>
@@ -62,7 +64,12 @@ std::array<char, PackSize<Args...>::value> packArray(Args... args)
   return buffer;
 }
 
-std::pair<std::tuple<>, const char*> unpackBuffer(const char* buf)
+// TODO: there's gotta be a better way of doing this
+template <class... Args>
+typename std::enable_if<
+  sizeof...(Args) == 0,
+  std::pair<std::tuple<>, const char*>
+>::type unpackBuffer(const char* buf)
 {
   return {{}, buf};
 }
@@ -70,9 +77,8 @@ std::pair<std::tuple<>, const char*> unpackBuffer(const char* buf)
 template <class T, class... Args>
 std::pair<std::tuple<T, Args...>, const char*> unpackBuffer(const char* buf)
 {
-  T val = reinterpret_cast<const T*>(buf);
+  T val = *reinterpret_cast<const T*>(buf);
 
-  // TODO: can we do this more efficiently?
   auto result = unpackBuffer<Args...>(buf + sizeof(T));
   return {
       std::tuple_cat(std::tuple<T>(val), result.first),
@@ -136,6 +142,10 @@ public:
 
   std::string recv()
   {
+    // Ignore the server identity
+    zmq::message_t identity;
+    socket_.recv(&identity); // TODO: can we reduce the overhead of this?
+
     zmq::message_t msg;
     socket_.recv(&msg);
     return {static_cast<char *>(msg.data()), msg.size()}; // TODO: can we eliminate the copy here?
@@ -179,14 +189,18 @@ public:
 
   Job recvJob()
   {
+    // TODO: can we assert the size of the buffer here?
     const auto buf = socket_.recv();
+    std::cout << "recved: " << buf.size() << std::endl;
+
     auto result = unpackBuffer<
       std::uint8_t,   // Message type
       std::uint32_t,  // Job ID
       std::uint32_t   // Job type
-    >(buf);
+    >(buf.data());
 
     // The remaining bytes in the buffer is the job data
+    std::cout << "size: " << buf.size() << " " << result.second - buf.data() << std::endl;
     std::vector<double> data(buf.size() - (result.second - buf.data()));
     memcpy(data.data(), result.second, data.size());
 
@@ -225,14 +239,13 @@ void runWorker(const std::string& address, Nll nll)
   // Send hello message to initiate the protocol
   handler.sendHello();
 
-  /*
-  while (false) // TODO: interrupt flag
+  for (int i = 0; i < 1; i++) // TODO: interrupt flag
   {
     const auto job = handler.recvJob();
     const auto result = nll(job.type, job.data);
 
     handler.sendResult(job.id, result);
-  }*/
+  }
 }
 
 }
