@@ -30,12 +30,11 @@ class ProtocolTests(unittest.TestCase):
 
     def _assert_hello(self):
         data = self.conn.recv(1024)
-        self.assertEqual(1 + 1 + 4 + 4, len(data))
+        self.assertEqual(1 + 4 + 4, len(data))
 
-        msg_type, version, job_type_from, job_type_to = struct.unpack('=bbII', data)
+        msg_type, job_type_from, job_type_to = struct.unpack('=bII', data)
 
         self.assertEqual(1, msg_type)
-        self.assertEqual(0, version)
         self.assertEqual(0, job_type_from)
         self.assertEqual(0, job_type_to)
 
@@ -51,7 +50,7 @@ class ProtocolTests(unittest.TestCase):
 
         msg_type, job_id, result = struct.unpack('=bId', data)
 
-        self.assertEqual(3, msg_type)
+        self.assertEqual(5, msg_type)
         self.assertEqual(expected_job_id, job_id)
         self.assertEqual(expected_result, result)
 
