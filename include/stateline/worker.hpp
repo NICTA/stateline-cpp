@@ -175,9 +175,13 @@ public:
     >(buf.data());
 
     // The remaining bytes in the buffer is the job data
-    assert(result.second - buf.data() < buf.size());
-    std::vector<double> data(buf.size() - (result.second - buf.data()));
-    memcpy(data.data(), result.second, data.size());
+    const auto numBytesLeft = buf.size() - (result.second - buf.data());
+    assert(numBytesLeft >= 0);
+    assert(numBytesLeft % 8 == 0);
+
+    const auto jobDataLength = numBytesLeft / 8;
+    std::vector<double> data(jobDataLength);
+    memcpy(data.data(), result.second, numBytesLeft);
 
     return {
       std::get<1>(result.first),
@@ -215,7 +219,7 @@ void runWorker(const std::string& address, Nll nll)
   // Send hello message to initiate the protocol
   handler.sendHello(0, 0);
 
-  for (int i = 0; i < 1; i++) // TODO: interrupt flag
+  while (true)
   {
     const auto job = handler.recvJob();
     const auto result = nll(job.type, job.data);

@@ -1,4 +1,3 @@
-//!
 //! A demo using Stateline to sample from a standard normal distribution.
 //!
 //! This file aims to be a tutorial on setting up a MCMC simulation using
